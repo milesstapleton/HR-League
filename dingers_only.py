@@ -1,4 +1,4 @@
-# Updated Streamlit Fantasy HR Tracker with Monthly Filters
+# Updated Streamlit Fantasy HR Tracker with Monthly Filters and Winnings Summary
 
 import streamlit as st
 import requests
@@ -33,17 +33,21 @@ for team, players in fantasy_teams.items():
         player_team_lookup[norm] = team
         original_name_lookup[norm] = player
 
-# --- Streamlit UI ---
+# --- Date Helpers ---
+first_month = datetime(2025, 4, 1)
+latest_month = datetime.today().replace(day=1)
+
+# --- UI Layout ---
 st.set_page_config(page_title="Fantasy HR Tracker", layout="wide")
 st.title("Fantasy Baseball Home Run Tracker")
 
-# --- Select Month ---
-month_options = pd.date_range("2025-04-01", datetime.today(), freq='MS').strftime('%B %Y').tolist()
-selected_month_str = st.selectbox("Select a Month", month_options[::-1])  # Most recent first
-selected_month = datetime.strptime(selected_month_str, "%B %Y")
+page = st.sidebar.radio("Choose View", ["Monthly Leaderboard", "Winnings Summary"])
 
-# --- Date range ---
-start_date = max(selected_month, datetime(2025, 4, 4))  # April starts on the 4th
+# --- Month Selection ---
+month_options = pd.date_range(first_month, latest_month, freq='MS').strftime('%B %Y').tolist()
+selected_month_str = st.sidebar.selectbox("Select a Month", month_options[::-1])
+selected_month = datetime.strptime(selected_month_str, "%B %Y")
+start_date = max(selected_month, datetime(2025, 4, 4))
 end_date = (selected_month + pd.offsets.MonthEnd(0)).to_pydatetime()
 
 @st.cache_data(show_spinner=True)
@@ -76,7 +80,6 @@ def fetch_hr_data(start_date, end_date):
             print(f"Error on {date_str}: {e}")
         current_date += timedelta(days=1)
 
-    # Build DataFrame
     results = []
     for norm_name, team in player_team_lookup.items():
         hrs = player_hr_totals.get(norm_name, 0)
@@ -88,30 +91,56 @@ def fetch_hr_data(start_date, end_date):
 
     return pd.DataFrame(results)
 
-if st.button("Refresh Home Run Data"):
-    st.cache_data.clear()
+# --- Fetch data ---
+def get_monthly_results():
+    month_data = {}
+    months = pd.date_range(first_month, latest_month, freq='MS')
+    for month in months:
+        s = max(month, datetime(2025, 4, 4))
+        e = (month + pd.offsets.MonthEnd(0)).to_pydatetime()
+        df = fetch_hr_data(s, e)
+        top_6 = df.sort_values(by='HRs', ascending=False).groupby('Team').head(6)
+        leaderboard = top_6.groupby('Team')['HRs'].sum().sort_values(ascending=False)
+        month_data[month.strftime('%B %Y')] = leaderboard
+    return month_data
 
-# --- Fetch and process data ---
-df = fetch_hr_data(start_date, end_date)
+# --- Monthly Leaderboard ---
+if page == "Monthly Leaderboard":
+    df = fetch_hr_data(start_date, end_date)
+    top_6_per_team = df.sort_values(by='HRs', ascending=False).groupby('Team').head(6).reset_index(drop=True)
+    leaderboard = top_6_per_team.groupby('Team')['HRs'].sum().sort_values(ascending=False)
 
-# --- Top 6 per team ---
-top_6_per_team = (
-    df.sort_values(by='HRs', ascending=False)
-      .groupby('Team')
-      .head(6)
-      .reset_index(drop=True)
-)
+    st.subheader(f"Leaderboard for {selected_month_str} (Top 6 Players Per Team)")
+    st.bar_chart(leaderboard)
 
-# --- Leaderboard ---
-leaderboard = top_6_per_team.groupby('Team')['HRs'].sum().sort_values(ascending=False)
+    selected_team = st.selectbox("Select a Team to View Player Stats", sorted(fantasy_teams.keys()))
+    team_df = df[df['Team'] == selected_team].sort_values(by='HRs', ascending=False)
 
-st.subheader(f"Fantasy Leaderboard for {selected_month_str} (Top 6 Players Per Team)")
-st.bar_chart(leaderboard)
+    st.subheader(f"{selected_team}'s Player Stats")
+    st.dataframe(team_df, use_container_width=True)
 
-# --- Team breakdown ---
-selected_team = st.selectbox("Select a Team to View Player Stats", sorted(fantasy_teams.keys()))
-team_df = df[df['Team'] == selected_team].sort_values(by='HRs', ascending=False)
+# --- Winnings Summary ---
+eligible_months = pd.date_range(first_month, latest_month, freq='MS').strftime('%B %Y').tolist()
+results = get_monthly_results()
+team_names = fantasy_teams.keys()
 
-st.subheader(f"{selected_team}'s Player Stats")
-st.dataframe(team_df, use_container_width=True)
+winnings = pd.DataFrame(index=team_names, columns=['Paid', 'Won'])
+winnings.fillna(0, inplace=True)
 
+for month, leaderboard in results.items():
+    if leaderboard.empty: continue
+    if len(leaderboard) >= 1:
+        first = leaderboard.index[0]
+        winnings.at[first, 'Won'] += 35
+    if len(leaderboard) >= 2:
+        second = leaderboard.index[1]
+        winnings.at[second, 'Won'] += 15
+    for team in leaderboard.index:
+        winnings.at[team, 'Paid'] += 10
+
+winnings['Net'] = winnings['Won'] - winnings['Paid']
+
+if page == "Winnings Summary":
+    st.subheader("Fantasy Team Financials Summary")
+    st.dataframe(winnings.sort_values(by='Net', ascending=False), use_container_width=True)
+    st.bar_chart(winnings['Net'].sort_values(ascending=False))
